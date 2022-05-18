@@ -25,27 +25,6 @@ def test_mnlogit(data, segment=1):
     print(res["metric"])
 
 
-def test_mnlogit_withStateDependence(data, segment=1):
-
-    S = segment
-    config = dict(
-        T=10,
-        I=300,
-        S=segment,
-        # feat_slice=[[0],[1]]
-    )
-    endog = data[:, 2]
-    exog = data[:, 3:]
-
-    mnlogit = src.models.MNLogit(endog, exog, **config)
-    mnlogit.fit()
-    res = mnlogit.summary()
-    print(f"Results for Segments: {S}")
-    print(res["coef"])
-    print(f"Relative size of each segment for {S} segment: ", res["prob"].round(3))
-    print(res["metric"])
-
-
 def main():
     # ============================================================================
     # Col1= Customer ID
@@ -69,8 +48,8 @@ def main():
     # Col4-5 = prices and states for brand A
     # Col6-7 = prices and states for brand B
     data = data[:,[0,1,2,3,5,4,6]] 
-    test_mnlogit_withStateDependence(data, segment=1) # mnlogit
-    test_mnlogit_withStateDependence(data, segment=3) # mnlogit with latent class
+    test_mnlogit(data, segment=1) # mnlogit
+    test_mnlogit(data, segment=3) # mnlogit with latent class
 
 
 if __name__ == "__main__":

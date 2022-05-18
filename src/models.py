@@ -47,6 +47,7 @@ class MNLogit(object):
         self.X = torch.tensor(exog, dtype=torch.float32)
         self.y = torch.tensor(endog, dtype=torch.float32)
         self.Z = torch.ones((self.I, self.S), dtype=torch.float32) # latent feature
+        self.Z[:, -1] = 0.0 # last segment as baseline
 
         # reshape
         self.X = self.X.reshape((self.I, self.T, -1)) # x: [N_I, N_T, N_k * N_J]
@@ -64,13 +65,11 @@ class MNLogit(object):
         # model and optimizer
         set_seed(self.seed)
         beta = nn.Parameter(torch.randn((self.S, 1 + self.k)))  # [N_segments, N_params]
-        gamma_0 = nn.Parameter(torch.tensor([0.0]), requires_grad=False)  # [N_segments, 1]
-        gamma = nn.Parameter(torch.randn((self.S - 1,)))
+        gamma = nn.Parameter(torch.randn((self.S, )))
         self.opt = torch.optim.SGD([beta, gamma], lr=self.lr)
         self.model = dict(
             epoch = 0,
             beta = beta, 
-            gamma_0 = gamma_0, 
             gamma = gamma
         )
 
@@ -87,7 +86,7 @@ class MNLogit(object):
 
     def loss_fn(self):
         beta = self.model["beta"]
-        gamma = torch.cat([self.model["gamma"], self.model["gamma_0"]])
+        gamma = self.model["gamma"]
         return -self.log_likelihood(beta, gamma)
         
 
@@ -112,7 +111,6 @@ class MNLogit(object):
         D = torch.stack(xb).exp().sum(dim=0) # denominator
         for c, xb_j in enumerate(xb):
             c = c + 1 # indexed from 1
-
             # [N_I, N_T, N_S] ** [N_I, N_T, 1] -> [N_I, N_T, N_S]
             prob *= (xb_j.exp() / D) ** (y == c).to(y).reshape(self.I, self.T, 1)  
         prob = torch.prod(prob, dim=1)  # [N_I, N_S]
@@ -139,12 +137,14 @@ class MNLogit(object):
                 self.model["epoch"] = epoch
 
         self.train_likelihood = likelihood
+        self.AIC = -2 * (likelihood[self.model["epoch"]] + self.S * (1 + self.k) + self.S)
+        self.BIC = -2 * likelihood[self.model["epoch"]] + (self.S * (1 + self.k) + self.S) * np.log(self.N)
         self.trained = True
 
 
     def hessian(self):
         beta = self.model["beta"]
-        gamma = torch.cat([self.model["gamma"], self.model["gamma_0"]])
+        gamma = self.model["gamma"]
         # Hessian (H_{beta}, H_{b,g}, H_{g,b}, H_{gamma})
         hessian = torch.autograd.functional.hessian(
             self.log_likelihood, (beta, gamma)
@@ -165,28 +165,22 @@ class MNLogit(object):
             self.fit()
         # fetch attributes
         H = self.hessian()
-        H_beta, H_gamma = H["H_beta"], H["H_gamma"]
-        beta = self.model["beta"]
-        gamma, gamma_0 = self.model["gamma"], self.model["gamma_0"]
+        H_beta, H_gamma = H["H_beta"].detach(), H["H_gamma"].detach()
+        beta, gamma = self.model["beta"].detach(), self.model["gamma"].detach()
+        gamma[-1] = 0.0
 
         # compute std
         std_beta = torch.stack([-1 / H_beta[s, s, :, :].diag() for s in range(self.S)])
-        std_beta = std_beta.detach().numpy() ** 0.5
+        std_beta = std_beta.numpy() ** 0.5
         std_gamma = -1 / H_gamma.diag()
-        std_gamma = std_gamma.detach().numpy() ** 0.5
+        std_gamma = std_gamma.numpy() ** 0.5
         
         # latent probabilty (aka. class size)
-        pi = torch.cat([gamma, gamma_0]).softmax(dim=0).detach().numpy()
-        beta, gamma = beta.detach().numpy(), gamma.detach().numpy()
-
-        # AIC and BIC
-        epoch = self.model["epoch"]
-        self.AIC = -2 * (self.train_likelihood[epoch] + beta.shape[0] * beta.shape[1] + gamma.shape[0])
-        self.BIC = -2 * (self.train_likelihood[epoch]) + (
-            beta.shape[0] * beta.shape[1] + gamma.shape[0]
-        ) * np.log(self.N)
+        pi = gamma.softmax(dim=0).numpy()
 
         # organize results
+        # parameter estimate
+        beta, gamma = beta.numpy(), gamma.numpy()
         res_1 = pd.DataFrame(
             data=np.zeros((self.S * (1 + self.k) + self.S, 3)),
             index=[
@@ -195,16 +189,18 @@ class MNLogit(object):
             ] + [f"gamma_{s}" for s in range(self.S)],
             columns=["coef.", "S.E.", "T-value"],
         )
-        res_1.iloc[:, 0] = np.concatenate([beta.T.ravel(), gamma, [gamma_0]])
-        res_1.iloc[:, 1] = np.concatenate([std_beta.T.ravel(), std_gamma[:-1], [np.nan]])
+        res_1.iloc[:, 0] = np.concatenate([beta.T.ravel(), gamma])
+        res_1.iloc[:, 1] = np.concatenate([std_beta.T.ravel(), std_gamma])
         res_1.iloc[:, 2] = np.concatenate(
-            [(beta / std_beta).T.ravel(), gamma / std_gamma[:-1], [np.nan]]
+            [(beta / std_beta).T.ravel(), gamma / std_gamma]
         )
 
-        res_2 = pd.DataFrame(
-            {"Log-liklihood": [self.train_likelihood[epoch]], "AIC": self.AIC, "BIC": self.BIC},
-            index=[f"N_Segment_{self.S}"],
-        )
+        # AIC and BIC
+        res_2 = pd.DataFrame({
+            "Log-likelihood": [self.train_likelihood[self.model["epoch"]]], 
+            "AIC": self.AIC, 
+            "BIC": self.BIC,
+        }, index=[f"N_Segment_{self.S}"],)
 
         return dict(
             coef=res_1,
